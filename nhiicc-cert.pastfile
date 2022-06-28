@@ -1,0 +1,193 @@
+cat << EOF
+#!/bin/bash
+# ******* This script is licensed under            **********
+# *******    the GNU General Public License 2.1    **********
+# *******                         by Robert D. Wei **********
+
+CertFile="/usr/local/share/NHIICC/cert/NHIRootCA.crt"
+CertName="NHI.Root.CA"
+
+function main() {
+
+  eval \$( analysis_arguments "\$@" )
+
+  if \$ask_help ; then
+    show_help
+
+  elif \$for_all ; then
+    modify_cert_on_all \$act
+
+  elif \$has_dir ; then
+    modify_cert_in_directory \$act "\$directory" \$recursive
+
+  else
+    modify_cert_in_users_home \$act "\$HOME"
+
+  fi
+}
+
+
+function analysis_arguments() {
+  local act ask_help=false for_all=false has_dir=false directory recursive=false
+  local is_root myID="\$( id -u )" x valu
+
+  test "\$myID" = "0" && is_root=true || is_root=false
+
+  if [ "\$1" = "add" ] ; then
+    act=add
+  elif [ "\$1" = "remove" ] ; then
+    act=remove
+  elif [ "\$1" = "" ] || [ "\$1" = "-h" ] || [ "\$1" = "--help" ] ; then
+    ask_help=true
+  else
+    echo "「\$1」命令不存在。" 1>&2
+    show_help 1>&2
+    echo exit 1 ; return 1
+  fi
+  shift
+
+  while [ \$# -gt 0 ] ; do
+    case "\$1" in
+     --all)
+      if \$is_root ; then
+        for_all=true
+        shift
+      else
+        echo '需要有根帳號(root)的權限才能為所有人管理憑證。' 1>&2
+        exit 1
+      fi
+      ;;
+
+     -d)
+      shift
+      directory="\$1"
+      has_dir=true
+      shift
+      ;;
+
+     -R)
+      recursive=true
+      shift
+      ;;
+
+     *)
+      echo "無法解釋參數「\$1」。" 1>&2
+      exit 1
+    esac
+  done
+
+  if \$for_all && ( \$has_dir || \$recursive ); then
+    echo "參數「--all」不能和其他參數同時使用。" 1>&2
+    echo exit 1 ; return 1
+  elif \$has_dir && ! [ -d "\$directory" ] ; then
+    echo "「\$4」不是資料夾。" 1>&2
+    echo exit 1 ; return 1
+  elif \$has_dir && \\
+       [ "\$( stat -c '%u' \$directory )" != "\$myID" ] && ! is_root ; then
+    echo "「\$directory」資料夾不屬於你，請改用根帳號(root)權限進行作業。" 1>&2
+    echo exit 1 ; return 1
+  elif \$recursive && ! \$has_dir ; then
+    echo "參數「-R」必須和參數「-d ...」同時使用。" 1>&2
+    echo exit 1 ; return 1
+  fi
+
+  echo -n "local "
+  for x in act ask_help for_all has_dir directory recursive ; do
+     eval valu=\\$\$x
+     echo -n \$x="\"\$valu\" "
+  done
+}
+
+function show_help() {
+
+  echo -e "\n命令格式：\n"
+  echo -e "\tnhiicc-cert add|remove\n"
+  echo -e "\t\t在自己的 nss 資料庫和 firefox 的預設帳號中增刪憑證。\n"
+  echo -e "\tnhiicc-cert add|remove --all\n"
+  echo -e "\t\t在所有人的家目錄中增刪憑證。（需要 root 權限）\n"
+  echo -e "\tnhiicc-cert add|remove [-R] [-d 資料夾名稱]\n"
+  echo -e "\t\t在指定的資料夾中增刪憑證，使用「-R」會包含所有子資料夾。\n"
+  echo -e "\tnhiicc-cert [-h|--help]\n"
+  echo -e "\t\t使用說明。\n"
+  echo -e "\t注意：後方的參數會覆蓋前方相同參數的設定。\n"
+}
+
+function modify_cert_on_all() {
+  local act=\$1 home_dir recursive=true
+
+  for home_dir in \$( print_all_home_directory ) ; do
+    echo "\${act}: Work on \$home_dir"
+    test \$act = add \\
+      && modify_cert_in_users_home add "\$home_dir" \\
+      || modify_cert_in_directory remove "\$home_dir" \$recursive
+  done
+}
+
+function modify_cert_in_directory() {
+  local act=\$1 directory="\$2" recursive="\$3" certDir
+
+  for certDir in \$(
+    ! \$recursive && echo "\$directory" \\
+                 || ( find "\$directory" -name "cert[89].db" 2> /dev/null \\
+                        | sed s/cert..db\$// | sort | uniq ) ) ; do
+    modify_cert_in_this_database \$act "\$certDir"
+  done
+}
+
+function modify_cert_in_users_home() {
+  local act=\$1 home_dir="\$2" certDir ffxPath="\$2/.mozilla/firefox"
+
+  for certDir in \$( 
+    find "\$home_dir/.pki" -name nssdb 2> /dev/null
+    test \$act = add \\
+      && ( grep "^Default=.." "\$ffxPath/profiles.ini" \\
+            | sed "s|^Default=|\$ffxPath/|" ) \\
+      || ( grep "^Path=" "\$ffxPath/profiles.ini" \\
+            | sed "s|^Path=|\$ffxPath/|" ) ) ; do
+    modify_cert_in_this_database \$act "\$certDir"
+  done
+  
+}
+
+function print_all_home_directory() {
+  local lineData
+
+  grep -v '^nobody:' /etc/passwd | cut -d : -f 3,6 \\
+   | while read lineData ; do
+      if [ \${lineData%%:*} -ge 1000 ] ; then
+        echo "\${lineData#*:}"
+      fi
+  done
+}
+
+function modify_cert_in_this_database() {
+  local act=\$1 certDir="\$2"
+  local not_sql=true
+
+    if [ -f "\$certDir/cert9.db" ] ; then
+      if [ \$act = add ] ; then
+        echo "Add to sql:\$certDir"
+        certutil -A -n "\$CertName" -t "TC,," -i "\$CertFile" -d sql:"\$certDir"
+      else
+        certutil -L -n "\$CertName" -d sql:"\$certDir" >/dev/null 2>&1 \\
+        && (  echo "Remove from sql:\$certDir" ; \\
+              certutil -D -n "\$CertName" -d sql:"\$certDir" )
+      fi
+      not_sql=false
+    fi
+    
+    if [ \$act = remove ] || \$not_sql ; then
+      if [ \$act = add ] ; then
+        echo "Add to dbm:\$certDir"
+        certutil -A -n "\$CertName" -t "PCT,Cu,Tu" -i "\$CertFile" -d dbm:"\$certDir"
+      else
+        certutil -L -n "\$CertName" -d dbm:"\$certDir" >/dev/null 2>&1 \\
+        && (  echo "Remove from dbm:\$certDir" ; \\
+              certutil -D -n "\$CertName" -d dbm:"\$certDir" )
+      fi
+    fi
+}
+
+main "\$@"
+
+EOF

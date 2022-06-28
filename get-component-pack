@@ -1,0 +1,500 @@
+#!/bin/bash
+# ******* This script is licensed under            **********
+# *******    the GNU General Public License 2.1    **********
+# *******                         by Robert D. Wei **********
+
+ function packing() {
+  local Date='2022-06-19 UTC'
+
+  local TgzFile=mLNHIICC_Setup.20220110.tar.gz
+  local pakDir=mLNHIICC_Setup.20220530
+  local NHIICCdir=usr/local/share/NHIICC
+  local cmdPath=usr/local/bin
+  local Server=cloudicweb.nhi.gov.tw/
+  local Path=cloudic/system/SMC/
+  local ZIPchecksum=a7a0780a2e8c492c50e6e35abfce0c75
+        ZIPchecksum+=c78c4d792ca6b265810bf32aaae94941
+
+  local pkgName=mlnhiicc
+  local verNumber=20220530-0ubuntu0-20.04
+  local chkSumStr
+
+  if [ $( uname -m ) = x86_64 ] ; then
+    local moduleStoreDir=x64
+    local arch=amd64
+    local size=2527
+    local libsslPak=libssl1.1
+  else
+    local moduleStoreDir=x32
+    local arch=i386
+    local size=1828
+    local libsslPak=libssl1.0
+  fi
+
+  local DEBpack=${pkgName}_${verNumber}_$arch.deb
+  local TempDir BeginDir Sum
+
+  if ! which ar > /dev/null ; then
+    echo "Can not find 'ar', please install 'binutils' package." >&2
+    return 1
+  fi
+
+  TempDir="$( mktemp -d )"
+  BeginDir="$PWD"
+
+  if [ -f $TgzFile ] ; then
+    Sum="$( sha256sum $TgzFile )"
+  fi
+
+  if [ "${Sum%% *}" != "$ZIPchecksum" ] ; then
+    rm -f $TgzFile
+    wget https://$Server/$Path/$TgzFile
+    Sum="$( sha256sum $TgzFile )"
+  fi
+
+  if [ "${Sum%% *}" != "$ZIPchecksum" ] ; then
+     echo "Error when downloading software package!" >&2
+     return 2
+  fi
+
+  cd "$TempDir"
+
+  tar xf $BeginDir/$TgzFile
+
+  mkdir -p control data/$NHIICCdir data/$cmdPath data/etc/init.d data/etc/rc5.d
+  chmod 755 data/$NHIICCdir
+
+  cp -a $pakDir/$moduleStoreDir/mLNHIICC data/$NHIICCdir
+  chmod 755 data/$NHIICCdir/mLNHIICC
+  cp -a $pakDir/web data/$NHIICCdir
+
+  cat > data/etc/init.d/NHIICC << EOF
+#!/bin/bash
+### BEGIN INIT INFO
+# Provides:        NHIICC
+# Required-Start:  \$network
+# Required-Stop:   \$network
+# Default-Start:   5
+# Default-Stop:    0 1 2 3 4
+# Short-Description: NHIICC daemon
+### END INIT INFO
+
+source /lib/lsb/init-functions
+
+case "\$1" in
+  start)
+    log_daemon_msg "Starting NHIICC daemon" "NHIICC"
+    start-stop-daemon --start --quiet --exec /$NHIICCdir/mLNHIICC &
+    log_end_msg \$?
+    ;;
+  stop)
+    log_daemon_msg "Stopping NHIICC daemon" "NHIICC"
+    start-stop-daemon --stop --exec /$NHIICCdir/mLNHIICC
+    log_end_msg \$?
+    ;;
+  status)
+    if  ps aux | grep NHIICC | grep -v grep > /dev/null ; then
+        echo "NHIICC is running";
+        exit 0;
+    else
+        echo "NHIICC is NOT running";
+        exit 0;
+    fi
+    ;;
+  force-reload|restart)
+    \$0 stop
+    \$0 start
+    ;;
+  *)
+    echo "Usage: \$0 {start|stop|restart|force-reload}"
+    exit 1
+    ;;
+esac
+
+EOF
+  chmod +x data/etc/init.d/NHIICC
+  touch -d "$Date" data/etc/init.d/NHIICC
+
+  cp -a $pakDir/cert data/$NHIICCdir
+
+  if [ "$arch" = "amd64" ] ; then
+    cd data/$NHIICCdir/cert/
+    mv ca.crt ca-old.crt
+    rm ca.key localhost.key localhost.csr localhost.crt NHIServerCert.crt \
+       NHIServerCert.key NHIRootCA.crt
+    cd -
+  fi
+
+  find data/$NHIICCdir/{cert,web} -type f -name '._*' -exec rm '{}' \;
+
+  cat > data/$cmdPath/nhiicc-cert << EOF
+#!/bin/bash
+# ******* This script is licensed under            **********
+# *******    the GNU General Public License 2.1    **********
+# *******                         by Robert D. Wei **********
+
+CertFile="/usr/local/share/NHIICC/cert/NHIRootCA.crt"
+CertName="NHI.Root.CA"
+
+function main() {
+
+  eval \$( analysis_arguments "\$@" )
+
+  if \$ask_help ; then
+    show_help
+
+  elif \$for_all ; then
+    modify_cert_on_all \$act
+
+  elif \$has_dir ; then
+    modify_cert_in_directory \$act "\$directory" \$recursive
+
+  else
+    modify_cert_in_users_home \$act "\$HOME"
+
+  fi
+}
+
+
+function analysis_arguments() {
+  local act ask_help=false for_all=false has_dir=false directory recursive=false
+  local is_root myID="\$( id -u )" x valu
+
+  test "\$myID" = "0" && is_root=true || is_root=false
+
+  if [ "\$1" = "add" ] ; then
+    act=add
+  elif [ "\$1" = "remove" ] ; then
+    act=remove
+  elif [ "\$1" = "" ] || [ "\$1" = "-h" ] || [ "\$1" = "--help" ] ; then
+    ask_help=true
+  else
+    echo "「\$1」命令不存在。" 1>&2
+    show_help 1>&2
+    echo exit 1 ; return 1
+  fi
+  shift
+
+  while [ \$# -gt 0 ] ; do
+    case "\$1" in
+     --all)
+      if \$is_root ; then
+        for_all=true
+        shift
+      else
+        echo '需要有根帳號(root)的權限才能為所有人管理憑證。' 1>&2
+        exit 1
+      fi
+      ;;
+
+     -d)
+      shift
+      directory="\$1"
+      has_dir=true
+      shift
+      ;;
+
+     -R)
+      recursive=true
+      shift
+      ;;
+
+     *)
+      echo "無法解釋參數「\$1」。" 1>&2
+      exit 1
+    esac
+  done
+
+  if \$for_all && ( \$has_dir || \$recursive ); then
+    echo "參數「--all」不能和其他參數同時使用。" 1>&2
+    echo exit 1 ; return 1
+  elif \$has_dir && ! [ -d "\$directory" ] ; then
+    echo "「\$4」不是資料夾。" 1>&2
+    echo exit 1 ; return 1
+  elif \$has_dir && \\
+       [ "\$( stat -c '%u' \$directory )" != "\$myID" ] && ! is_root ; then
+    echo "「\$directory」資料夾不屬於你，請改用根帳號(root)權限進行作業。" 1>&2
+    echo exit 1 ; return 1
+  elif \$recursive && ! \$has_dir ; then
+    echo "參數「-R」必須和參數「-d ...」同時使用。" 1>&2
+    echo exit 1 ; return 1
+  fi
+
+  echo -n "local "
+  for x in act ask_help for_all has_dir directory recursive ; do
+     eval valu=\\$\$x
+     echo -n \$x="\"\$valu\" "
+  done
+}
+
+function show_help() {
+
+  echo -e "\n命令格式：\n"
+  echo -e "\tnhiicc-cert add|remove\n"
+  echo -e "\t\t在自己的 nss 資料庫和 firefox 的預設帳號中增刪憑證。\n"
+  echo -e "\tnhiicc-cert add|remove --all\n"
+  echo -e "\t\t在所有人的家目錄中增刪憑證。（需要 root 權限）\n"
+  echo -e "\tnhiicc-cert add|remove [-R] [-d 資料夾名稱]\n"
+  echo -e "\t\t在指定的資料夾中增刪憑證，使用「-R」會包含所有子資料夾。\n"
+  echo -e "\tnhiicc-cert [-h|--help]\n"
+  echo -e "\t\t使用說明。\n"
+  echo -e "\t注意：後方的參數會覆蓋前方相同參數的設定。\n"
+}
+
+function modify_cert_on_all() {
+  local act=\$1 home_dir recursive=true
+
+  for home_dir in \$( print_all_home_directory ) ; do
+    echo "\${act}: Work on \$home_dir"
+    test \$act = add \\
+      && modify_cert_in_users_home add "\$home_dir" \\
+      || modify_cert_in_directory remove "\$home_dir" \$recursive
+  done
+}
+
+function modify_cert_in_directory() {
+  local act=\$1 directory="\$2" recursive="\$3" certDir
+
+  for certDir in \$(
+    ! \$recursive && echo "\$directory" \\
+                 || ( find "\$directory" -name "cert[89].db" 2> /dev/null \\
+                        | sed s/cert..db\$// | sort | uniq ) ) ; do
+    modify_cert_in_this_database \$act "\$certDir"
+  done
+}
+
+function modify_cert_in_users_home() {
+  local act=\$1 home_dir="\$2" certDir ffxPath="\$2/.mozilla/firefox"
+
+  for certDir in \$( 
+    find "\$home_dir/.pki" -name nssdb 2> /dev/null
+    test \$act = add \\
+      && ( grep "^Default=.." "\$ffxPath/profiles.ini" \\
+            | sed "s|^Default=|\$ffxPath/|" ) \\
+      || ( grep "^Path=" "\$ffxPath/profiles.ini" \\
+            | sed "s|^Path=|\$ffxPath/|" ) ) ; do
+    modify_cert_in_this_database \$act "\$certDir"
+  done
+  
+}
+
+function print_all_home_directory() {
+  local lineData
+
+  grep -v '^nobody:' /etc/passwd | cut -d : -f 3,6 \\
+   | while read lineData ; do
+      if [ \${lineData%%:*} -ge 1000 ] ; then
+        echo "\${lineData#*:}"
+      fi
+  done
+}
+
+function modify_cert_in_this_database() {
+  local act=\$1 certDir="\$2"
+  local not_sql=true
+
+    if [ -f "\$certDir/cert9.db" ] ; then
+      if [ \$act = add ] ; then
+        echo "Add to sql:\$certDir"
+        certutil -A -n "\$CertName" -t "TC,," -i "\$CertFile" -d sql:"\$certDir"
+      else
+        certutil -L -n "\$CertName" -d sql:"\$certDir" >/dev/null 2>&1 \\
+        && (  echo "Remove from sql:\$certDir" ; \\
+              certutil -D -n "\$CertName" -d sql:"\$certDir" )
+      fi
+      not_sql=false
+    fi
+    
+    if [ \$act = remove ] || \$not_sql ; then
+      if [ \$act = add ] ; then
+        echo "Add to dbm:\$certDir"
+        certutil -A -n "\$CertName" -t "PCT,Cu,Tu" -i "\$CertFile" -d dbm:"\$certDir"
+      else
+        certutil -L -n "\$CertName" -d dbm:"\$certDir" >/dev/null 2>&1 \\
+        && (  echo "Remove from dbm:\$certDir" ; \\
+              certutil -D -n "\$CertName" -d dbm:"\$certDir" )
+      fi
+    fi
+}
+
+main "\$@"
+
+EOF
+  chmod 755 data/$cmdPath/nhiicc-cert
+  touch -d "$Date" data/$cmdPath/nhiicc-cert
+
+  touch -d "$Date" $( find data -type d )
+
+
+
+
+
+  cat > control/control << EOF
+Package: $pkgName
+Version: $verNumber
+Architecture: $arch
+Maintainer: Freedman
+Installed-Size: $size
+Depends: openssl, pcscd, libnss3-tools, libc6, $libsslPak, libssl-dev, ca-certificates, libboost-all-dev, unbound-anchor
+Section: misc
+Priority: optional
+Homepage: https://cloudicweb.nhi.gov.tw/cloudic/system/SMC/mEventesting.htm
+Description: $pkgName for National Health Insurance Card using
+ This driver is sliced out for Ubuntu form official driver pack and then
+ packed into .deb file through shell commands.
+EOF
+
+  cd data
+  md5sum $( find -type f | sed 's|^./||' | sort ) > ../control/md5sums
+  cd - > /dev/null
+
+
+
+
+
+
+  cat > control/preinst << EOF
+#!/bin/sh
+
+service NHIICC stop 2> /dev/null
+service mLNHIICC stop 2> /dev/null
+killall -q mLNHIICC 2> /dev/null || true
+EOF
+
+
+
+
+
+  cat > control/postinst << EOF
+#!/bin/sh
+
+ln -s /etc/init.d/NHIICC /etc/rc5.d/S50NHIICC
+
+grep localhost /etc/hosts | grep -q 127.0.0.1
+if [ ! $? -eq 0 ] ; then
+    echo  \ \ >> /etc/hosts
+    echo 127.0.0.1 localhost >> /etc/hosts
+fi
+
+EOF
+
+  if [ "$arch" = "amd64" ] ; then
+    cat >> control/postinst << EOF
+org=nhi-localhost-ca
+domain=localhost
+
+trust anchor --remove /$NHIICCdir/cert/ca-old.crt || true
+
+openssl genpkey -algorithm RSA -out /$NHIICCdir/cert/ca.key
+openssl req -x509 -key /$NHIICCdir/cert/ca.key \\
+    -out /$NHIICCdir/cert/ca.crt -subj "/CN=\$org/O=\$org"
+
+openssl genpkey -algorithm RSA -out /$NHIICCdir/cert/"\$domain".key
+openssl req -new -key /$NHIICCdir/cert/"\$domain".key \\
+    -out /$NHIICCdir/cert/"\$domain".csr \\
+    -subj "/CN=\$domain/O=\$org"
+
+tempFil="\$( mktemp )"
+cat > "\$tempFil" << END
+basicConstraints = CA:FALSE
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+subjectAltName = DNS:\$domain
+END
+
+openssl x509 -req -in /$NHIICCdir/cert/"\$domain".csr -days 18263 \\
+    -out /$NHIICCdir/cert/"\$domain".crt \\
+    -CA /$NHIICCdir/cert/ca.crt \\
+    -CAkey /$NHIICCdir/cert/ca.key -CAcreateserial \\
+    -extfile "\$tempFil"
+
+rm "\$tempFil"
+
+trust anchor /$NHIICCdir/cert/ca.crt
+
+cp -a /$NHIICCdir/cert/localhost.crt \\
+   /$NHIICCdir/cert/NHIServerCert.crt
+cp -a /$NHIICCdir/cert/localhost.key \\
+   /$NHIICCdir/cert/NHIServerCert.key
+cp -a /$NHIICCdir/cert/ca.crt \\
+   /$NHIICCdir/cert/NHIRootCA.crt
+
+EOF
+  fi
+
+cat >> control/postinst << EOF
+/$cmdPath/nhiicc-cert add --all
+nohup bash -c '
+  while service NHIICC status 2>&1 | grep "could not be found" > /dev/null ; do
+    sleep 0.3
+  done
+  service NHIICC start &' > /dev/null &
+EOF
+
+  cp control/preinst control/prerm
+
+  echo -e "\nrm /etc/rc5.d/S50NHIICC" >> control/prerm
+
+  if [ "$arch" = "amd64" ] ; then
+    cat >> control/prerm << EOF
+
+/$cmdPath/nhiicc-cert remove --all
+
+trust anchor --remove /$NHIICCdir/cert/ca.crt
+
+rm /$NHIICCdir/cert/NHIRootCA.crt /$NHIICCdir/cert/NHIServerCert.key
+rm /$NHIICCdir/cert/NHIServerCert.crt
+org=nhi-localhost-ca
+domain=localhost
+rm /$NHIICCdir/cert/"\$domain".crt /$NHIICCdir/cert/"\$domain".csr
+rm /$NHIICCdir/cert/ca.crt /$NHIICCdir/cert/ca.key
+
+EOF
+  fi
+
+
+  cat > control/postrm << EOF
+#!/bin/sh
+
+grep -q iccert.nhi.gov.tw /etc/hosts;
+if [ \$? -eq 0 ] ; then
+    sed -i '/iccert\.nhi\.gov\.tw/d' /etc/hosts
+fi
+EOF
+
+  chmod +x control/p*
+
+  touch -d "$Date" control/*
+
+  cd control
+  tar -H ustar --sort=name --owner=root:0 --group=root:0 \
+      -cvf ../control.tar $( ls )
+  cd - > /dev/null
+
+  cd data
+  tar -H ustar --sort=name --owner=root:0 --group=root:0 \
+      -cvf ../data.tar  $( ls -d )
+  cd - > /dev/null
+
+  touch -d "$Date" control.tar data.tar
+  md5sum control.tar data.tar
+  gzip -c control.tar > control.tar.gz
+  xz -c data.tar > data.tar.xz
+  md5sum control.tar.gz data.tar.xz
+  echo 2.0 > debian-binary
+
+  ar cDr $BeginDir/$DEBpack \
+         debian-binary control.tar.gz data.tar.xz
+
+  cd $BeginDir
+  rm -r $TempDir
+  md5sum $DEBpack
+  chkSumStr="$(sha256sum $DEBpack)"
+  echo "$chkSumStr"
+  test "${chkSumStr%% *}" = "1b176020ecc0366d444d4437f75e140895c34aee7e1d85627a7379354080f411" \
+    && touch -d '2022-06-19 13:39:48.423851937 +0800' $DEBpack \
+    || (echo Checksum not match! 1>&2 ; false)
+ }
+
+ packing && unset packing || ( unset packing ; false)
+

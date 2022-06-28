@@ -1,0 +1,12 @@
+#!/bin/bash
+
+(
+  echo 'cat << EOF'
+  sed -e 's/\$/\\$/g' -e 's/\\$/\\\\/' nhiicc-cert
+  echo EOF
+) > nhiicc-cert.pastfile
+
+bash nhiicc-cert.pastfile | md5sum
+
+md5sum nhiicc-cert
+while ! read -t 0 ; do sleep 0.2 ; done ; read
